@@ -6,7 +6,7 @@ using System.Threading.Tasks;
 
 namespace Core.Persistence.Repositories;
 
-public class IEntityTimeStamps
+public interface IEntityTimestamps
 {
     DateTime CreatedDate { get; set; }
     DateTime? UpdatedDate { get; set; }
