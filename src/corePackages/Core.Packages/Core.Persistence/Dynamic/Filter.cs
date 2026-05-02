@@ -69,7 +69,7 @@ public class Filter
     //
     // Yani Filter sınıfı kendi içinde yine Filter listesi taşıyor.
     // Buna yazılımda "recursive (özyinelemeli) yapı" denir.
-    public IEnumerable<Filter> Filters { get; set; }
+    public IEnumerable<Filter>? Filters { get; set; }
 
     // Parametresiz constructor — boş bir Filter nesnesi oluşturur.
     // Field ve Operator string.Empty ile başlatılır.
