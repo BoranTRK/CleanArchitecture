@@ -1,7 +1,10 @@
-﻿using Core.Application.Pipelines.Caching;
+﻿using Core.Application.Logging;
+using Core.Application.Pipelines.Caching;
 using Core.Application.Pipelines.Transaction;
 using Core.Application.Pipelines.Validation;
 using Core.Application.Rules;
+using Core.CrossCuttingConcerns.Serilog;
+using Core.CrossCuttingConcerns.Serilog.Logger;
 using FluentValidation;
 using Microsoft.Extensions.DependencyInjection;
 using System;
@@ -28,7 +31,11 @@ public static class ApplicationServiceRegistration
             configuration.AddOpenBehavior(typeof(TransactionScopeBehavior<,>));
             configuration.AddOpenBehavior(typeof(CachingBehavior<,>));
             configuration.AddOpenBehavior(typeof(CacheRemovingBehavior<,>));
+            configuration.AddOpenBehavior(typeof(LoggingBehavior<,>));
         });
+
+        // Burayı ileride kendin değiştirebilirsin, veri tabanına yazmak istiyorsan DbLogger yapabilirsin, şu an için dosyaya yazdırıyor
+        services.AddSingleton<LoggerServiceBase, FileLogger>();
 
         return services;
     }
