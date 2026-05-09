@@ -1,0 +1,124 @@
+﻿using MediatR;
+using Microsoft.Extensions.Caching.Distributed;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Text.Json;
+using System.Threading.Tasks;
+
+namespace Core.Application.Pipelines.Caching;
+
+public class CachingBehavior<TRequest, TResponse> : IPipelineBehavior<TRequest, TResponse>
+     where TRequest : IRequest<TResponse>, ICachableRequest
+{
+    private readonly CacheSettings _cacheSettings; // appsettings içerisinden okunacak cache bilgileri için
+
+    // Cache işlemleri için kullanacağımız interface, DistributedCache mimarisi diye geçiyor
+    // bu mimari sayesinde farklı cache sağlayıcılarıyla çalışabiliriz, örneğin Redis, MemoryCache gibi
+    private readonly IDistributedCache _cache;
+    private readonly ILogger<CachingBehavior<TRequest, TResponse>> _logger;
+
+    public CachingBehavior(IDistributedCache cache, IConfiguration configuration, ILogger<CachingBehavior<TRequest, TResponse>> logger)
+    {
+        _cache = cache;
+
+        // appsettings içerisinden CacheSettings'i alıyoruz, eğer yoksa hata fırlattıyoruz
+        _cacheSettings = configuration.GetSection("CacheSettings").Get<CacheSettings>() ?? throw new InvalidOperationException();
+        _logger = logger;
+    }
+
+    public async Task<TResponse> Handle(TRequest request, RequestHandlerDelegate<TResponse> next, CancellationToken cancellationToken)
+    {
+        if (request.BypassCache) { // Seçilmişse hiç cache tribine girme
+            return await next();
+        }
+
+        TResponse response;
+        // cache içerisinde veriler byte tipinde saklanır, bu yüzden byte array olarak çekiyoruz
+        byte[]? cachedResponse = await _cache.GetAsync(request.CacheKey, cancellationToken); // Cache'den byte array olarak veriyi çekiyoruz
+
+        if (cachedResponse != null){
+            // cache içerisinde varsa eğer hiç dbye gitmeden direkt olarak bunu dönüyoruz burada
+            // byte array olarak tutulan datayı al, deserialize et
+            response = JsonSerializer.Deserialize<TResponse>(Encoding.Default.GetString(cachedResponse));
+            _logger.LogInformation($"Fetched from Cache -> {request.CacheKey}");
+        }
+        else
+        {
+            // eğer cachede yoksa dbden git veriyi al ve cacheye ekle
+            response = await getResponseAndAddToCache(request, next, cancellationToken);
+        }
+
+        return response;
+    }
+
+    private async Task<TResponse?> getResponseAndAddToCache(
+        TRequest request,
+        RequestHandlerDelegate<TResponse> next,
+        CancellationToken cancellationToken)
+    {
+        TResponse response = await next(); // dbden veriyi al
+
+        // cache'e eklemeden önce cache'in ne kadar süreyle geçerli olacağını belirliyoruz
+        TimeSpan slidingExpiration = request.SlidingExpiration ?? TimeSpan.FromDays(_cacheSettings.SlidingExpiration);
+
+        // cache'ye kaydedecez ama bunun opsiyonları neler, ne kadar geçerli olacak vb. gibi bilgileri burada belirliyoruz
+        DistributedCacheEntryOptions cacheOptions = new DistributedCacheEntryOptions{
+            SlidingExpiration = slidingExpiration
+        };
+
+        // Cache'e eklemeden önce veriyi byte array'e çeviriyoruz
+        byte[] serializedData = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(response));
+
+        await _cache.SetAsync(request.CacheKey, serializedData, cacheOptions, cancellationToken); // Cache'e ekleniyor
+        _logger.LogInformation($"Added to Cache -> {request.CacheKey}");
+
+        if (request.CacheGroupKey != null)
+            await addCacheKeyToGroup(request, slidingExpiration, cancellationToken);
+
+        return response;
+    }
+
+    private async Task addCacheKeyToGroup(TRequest request, TimeSpan slidingExpiration, CancellationToken cancellationToken)
+    {
+        byte[]? cacheGroupCache = await _cache.GetAsync(key: request.CacheGroupKey!, cancellationToken);
+        HashSet<string> cacheKeysInGroup;
+        if (cacheGroupCache != null)
+        {
+            cacheKeysInGroup = JsonSerializer.Deserialize<HashSet<string>>(Encoding.Default.GetString(cacheGroupCache))!;
+            if (!cacheKeysInGroup.Contains(request.CacheKey))
+                cacheKeysInGroup.Add(request.CacheKey);
+        }
+        else
+            cacheKeysInGroup = new HashSet<string>(new[] { request.CacheKey });
+        byte[] newCacheGroupCache = JsonSerializer.SerializeToUtf8Bytes(cacheKeysInGroup);
+
+        byte[]? cacheGroupCacheSlidingExpirationCache = await _cache.GetAsync(
+            key: $"{request.CacheGroupKey}SlidingExpiration",
+            cancellationToken
+        );
+        int? cacheGroupCacheSlidingExpirationValue = null;
+        if (cacheGroupCacheSlidingExpirationCache != null)
+            cacheGroupCacheSlidingExpirationValue = Convert.ToInt32(Encoding.Default.GetString(cacheGroupCacheSlidingExpirationCache));
+        if (cacheGroupCacheSlidingExpirationValue == null || slidingExpiration.TotalSeconds > cacheGroupCacheSlidingExpirationValue)
+            cacheGroupCacheSlidingExpirationValue = Convert.ToInt32(slidingExpiration.TotalSeconds);
+        byte[] serializeCachedGroupSlidingExpirationData = JsonSerializer.SerializeToUtf8Bytes(cacheGroupCacheSlidingExpirationValue);
+
+        DistributedCacheEntryOptions cacheOptions =
+            new() { SlidingExpiration = TimeSpan.FromSeconds(Convert.ToDouble(cacheGroupCacheSlidingExpirationValue)) };
+
+        await _cache.SetAsync(key: request.CacheGroupKey!, newCacheGroupCache, cacheOptions, cancellationToken);
+        _logger.LogInformation($"Added to Cache -> {request.CacheGroupKey}");
+
+        await _cache.SetAsync(
+            key: $"{request.CacheGroupKey}SlidingExpiration",
+            serializeCachedGroupSlidingExpirationData,
+            cacheOptions,
+            cancellationToken
+        );
+        _logger.LogInformation($"Added to Cache -> {request.CacheGroupKey}SlidingExpiration");
+    }
+}
